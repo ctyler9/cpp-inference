@@ -1,196 +1,240 @@
 #include "libs/onnxruntime/include/onnxruntime_cxx_api.h"
-
-#include <chrono>
-#include <cmath>
-#include <exception>
-#include <fstream>
-#include <iostream>
-#include <limits>
-#include <numeric>
-#include <string>
-#include <vector>
-
-#include <opencv2/dnn/dnn.hpp>
-#include <opencv2/imgcodecs.hpp>
-#include <opencv2/imgproc.hpp>
 #include <opencv2/opencv.hpp>
 
-template <typename T> T vectorProduct(const std::vector<T> &v) {
-  return accumulate(v.begin(), v.end(), 1, std::multiplies<T>());
+#include <iostream>
+
+typedef struct Result {
+  int x1;
+  int x2;
+  int y1;
+  int y2;
+  int obj_id;
+  float accuracy;
+
+  Result(int x1_, int x2_, int y1_, int y2_, int obj_id_, float accuracy_) {
+    x1 = x1_;
+    x2 = x2_;
+    y1 = y1_;
+    y2 = y2_;
+    obj_id = obj_id_;
+    accuracy = accuracy_;
+  }
+
+} result_t;
+
+int model_input_width;
+int model_input_height;
+int pad_size_y;
+int pad_size_x;
+int model_width_after_padding;
+int model_height_after_padding;
+
+// Class names for YOLOv7
+std::vector<std::string> classNames = {
+    "person",        "bicycle",       "car",           "motorbike",
+    "aeroplane",     "bus",           "train",         "truck",
+    "boat",          "traffic light", "fire hydrant",  "stop sign",
+    "parking meter", "bench",         "bird",          "cat",
+    "dog",           "horse",         "sheep",         "cow",
+    "elephant",      "bear",          "zebra",         "giraffe",
+    "backpack",      "umbrella",      "handbag",       "tie",
+    "suitcase",      "frisbee",       "skis",          "snowboard",
+    "sports ball",   "kite",          "baseball bat",  "baseball glove",
+    "skateboard",    "surfboard",     "tennis racket", "bottle",
+    "wine glass",    "cup",           "fork",          "knife",
+    "spoon",         "bowl",          "banana",        "apple",
+    "sandwich",      "orange",        "broccoli",      "carrot",
+    "hot dog",       "pizza",         "donut",         "cake",
+    "chair",         "sofa",          "potted plant",  "bed",
+    "dining table",  "toilet",        "tv monitor",    "laptop",
+    "mouse",         "remote",        "keyboard",      "cell phone",
+    "microwave",     "oven",          "toaster",       "sink",
+    "refrigerator",  "book",          "clock",         "vase",
+    "scissors",      "teddy bear",    "hair drier",    "toothbrush"};
+
+cv::Mat preprocess(cv::Mat &image) {
+
+  // Channels order: BGR to RGB
+  cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
+
+  // Calculate the scaling factor for resizing without distortion
+  double scale;
+  if (image.cols / static_cast<double>(image.rows) >
+      model_input_width / static_cast<double>(model_input_height)) {
+    scale = model_input_width / static_cast<double>(image.cols);
+  } else {
+    scale = model_input_height / static_cast<double>(image.rows);
+  }
+
+  // Resize the image with keeping the aspect ratio
+  cv::Mat resizedImage;
+  cv::resize(image, resizedImage, cv::Size(), scale, scale);
+
+  model_height_after_padding = resizedImage.size[0];
+  model_width_after_padding = resizedImage.size[1];
+  // Create a blank canvas with the desired model input size
+  cv::Mat paddedImage = cv::Mat::zeros(model_input_height, model_input_width,
+                                       resizedImage.type());
+
+  // Calculate the position to paste the resized image
+  int x_offset = (paddedImage.cols - resizedImage.cols) / 2;
+  int y_offset = (paddedImage.rows - resizedImage.rows) / 2;
+  pad_size_y = y_offset;
+  pad_size_x = x_offset;
+
+  // Copy the resized image to the center of the canvas
+  resizedImage.copyTo(paddedImage(
+      cv::Rect(x_offset, y_offset, resizedImage.cols, resizedImage.rows)));
+  // Convert image to float32 and normalize
+  cv::Mat floatImage;
+  paddedImage.convertTo(floatImage, CV_32F, 1.0 / 255.0);
+
+  // Create a 4-dimensional blob from the image
+  cv::Mat blobImage = cv::dnn::blobFromImage(floatImage);
+
+  return blobImage;
 }
 
-std::vector<std::string> readLabels(std::string &labelFilepath) {
-  std::vector<std::string> labels;
-  std::string line;
-  std::ifstream fp(labelFilepath);
-  while (std::getline(fp, line)) {
-    labels.push_back(line);
+std::vector<Result> postprocess(cv::Size originalImageSize,
+                                std::vector<Ort::Value> &outputTensors) {
+  auto *rawOutput = outputTensors[0].GetTensorData<float>();
+  std::vector<int64_t> outputShape =
+      outputTensors[0].GetTensorTypeAndShapeInfo().GetShape();
+  size_t count = outputTensors[0].GetTensorTypeAndShapeInfo().GetElementCount();
+  std::vector<float> output(rawOutput, rawOutput + count);
+
+  std::vector<Result> resultVector;
+
+  for (int i = 0; i < outputShape[0]; i++) {
+    float confidence = output[i * outputShape[1] + 0];
+    float x1 = output[i * outputShape[1] + 1];
+    float y1 = output[i * outputShape[1] + 2];
+    float x2 = output[i * outputShape[1] + 3];
+    float y2 = output[i * outputShape[1] + 4];
+    int classPrediction = output[i * outputShape[1] + 5];
+    float accuracy = output[i * outputShape[1] + 6];
+
+    (void)confidence;
+
+    std::cout << "Class Name: " << classNames.at(classPrediction) << std::endl;
+    std::cout << "Coords: Top Left (" << x1 << ", " << y1 << "), Bottom Right ("
+              << x2 << ", " << y2 << ")" << std::endl;
+    std::cout << "Accuracy: " << accuracy << std::endl;
+
+    // Coords should be scaled to the original image. The coords from the model
+    // are relative to the model's input height and width.
+    x1 = ((x1 - pad_size_x) / model_width_after_padding) *
+         originalImageSize.width;
+    x2 = ((x2 - pad_size_x) / model_width_after_padding) *
+         originalImageSize.width;
+    y1 = ((y1 - pad_size_y) / model_height_after_padding) *
+         originalImageSize.height;
+    y2 = ((y2 - pad_size_y) / model_height_after_padding) *
+         originalImageSize.height;
+
+    Result result(x1, x2, y1, y2, classPrediction, accuracy);
+
+    resultVector.push_back(result);
+
+    std::cout << std::endl;
   }
-  return labels;
+
+  return resultVector;
+}
+
+void drawBoundingBox(cv::Mat &image, std::vector<Result> &resultVector) {
+
+  for (auto result : resultVector) {
+
+    if (result.accuracy > 0.6) { // Threshold, can be made function parameter
+
+      cv::rectangle(image, cv::Point(result.x1, result.y1),
+                    cv::Point(result.x2, result.y2), cv::Scalar(0, 255, 0), 2);
+
+      cv::putText(image, classNames.at(result.obj_id),
+                  cv::Point(result.x1, result.y1 - 3), cv::FONT_ITALIC, 0.8,
+                  cv::Scalar(255, 255, 255), 2);
+
+      cv::putText(image, std::to_string(result.accuracy),
+                  cv::Point(result.x1, result.y1 + 30), cv::FONT_ITALIC, 0.8,
+                  cv::Scalar(255, 255, 0), 2);
+    }
+  }
 }
 
 int main() {
-  const int64_t batchSize = 2;
-  bool useCUDA{false};
 
-  std::string instanceName{"image-classification-inference"};
-  std::string modelFilePath{"./data/resnet18-v1-7.onnx"};
-  std::string imageFilePath{"./data/birb.jpg"};
-  std::string labelFilePath{"./data/synset.txt"};
-
-  std::vector<std::string> labels{readLabels(labelFilePath)};
-
-  Ort::Env env(OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING,
-               instanceName.c_str());
-  Ort::SessionOptions sessionOptions;
-  sessionOptions.SetInterOpNumThreads(1);
-  if (useCUDA) {
-    OrtCUDAProviderOptions cuda_options{};
-    sessionOptions.AppendExecutionProvider_CUDA(cuda_options);
-  }
-
-  sessionOptions.SetGraphOptimizationLevel(
-      GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
-
-  Ort::Session session(env, modelFilePath.c_str(), sessionOptions);
+  const char *model_path = "./data/yolov7-tiny.onnx";
 
   Ort::AllocatorWithDefaultOptions allocator;
 
-  size_t numInputNodes = session.GetInputCount();
-  size_t numOutputNodes = session.GetOutputCount();
+  Ort::SessionOptions session_options;
+  Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "ONNXRuntime");
+  Ort::Session session(env, model_path, session_options);
 
-  const char *inputName = session.GetInputNameAllocated(0, allocator).get();
+  size_t num_input_nodes = session.GetInputCount();
+  size_t num_output_nodes = session.GetOutputCount();
 
-  Ort::TypeInfo inputTypeInfo = session.GetInputTypeInfo(0);
-  auto inputTensorInfo = inputTypeInfo.GetTensorTypeAndShapeInfo();
+  std::vector<char *> input_node_names;
+  std::vector<Ort::AllocatedStringPtr> input_node_allocated_strings;
+  std::vector<char *> output_node_names;
+  std::vector<Ort::AllocatedStringPtr> output_node_allocated_strings;
 
-  ONNXTensorElementDataType inputType = inputTensorInfo.GetElementType();
-
-  std::vector<int64_t> inputDims = inputTensorInfo.GetShape();
-  if (inputDims.at(0) == -1) {
-    std::cout << "Got dynamic batch size. Setting input batch size to "
-              << batchSize << "." << std::endl;
-    inputDims.at(0) = batchSize;
+  for (size_t i = 0; i < num_input_nodes; ++i) {
+    auto input_name = session.GetInputNameAllocated(i, allocator);
+    input_node_allocated_strings.push_back(std::move(input_name));
+    input_node_names.push_back(input_node_allocated_strings.back().get());
   }
 
-  const char *outputName = session.GetOutputNameAllocated(0, allocator).get();
-
-  Ort::TypeInfo outputTypeInfo = session.GetOutputTypeInfo(0);
-  auto outputTensorInfo = outputTypeInfo.GetTensorTypeAndShapeInfo();
-
-  ONNXTensorElementDataType outputType = outputTensorInfo.GetElementType();
-
-  std::vector<int64_t> outputDims = outputTensorInfo.GetShape();
-  if (outputDims.at(0) == -1) {
-    std::cout << "Got dynamic batch size. Setting output batch size to "
-              << batchSize << "." << std::endl;
-    outputDims.at(0) = batchSize;
+  for (size_t i = 0; i < num_output_nodes; ++i) {
+    auto output_name = session.GetOutputNameAllocated(i, allocator);
+    output_node_allocated_strings.push_back(std::move(output_name));
+    output_node_names.push_back(output_node_allocated_strings.back().get());
   }
 
-  std::cout << "Number of Input Nodes: " << numInputNodes << std::endl;
-  std::cout << "Number of Output Nodes: " << numOutputNodes << std::endl;
-  std::cout << "Input Name: " << inputName << std::endl;
-  std::cout << "Input Type: " << inputType << std::endl;
-  // std::cout << "Input Dimensions: " << inputDims << std::endl;
-  std::cout << "Output Name: " << outputName << std::endl;
-  std::cout << "Output Type: " << outputType << std::endl;
-  // std::cout << "Output Dimensions: " << outputDims << std::endl;
-
-  cv::Mat imageBGR = cv::imread(imageFilePath, cv::ImreadModes::IMREAD_COLOR);
-  cv::Mat resizedImageBGR, resizedImageRGB, resizedImage, preprocessedImage;
-  cv::resize(imageBGR, resizedImageBGR,
-             cv::Size(inputDims.at(3), inputDims.at(2)),
-             cv::InterpolationFlags::INTER_CUBIC);
-  cv::cvtColor(resizedImageBGR, resizedImageRGB,
-               cv::ColorConversionCodes::COLOR_BGR2RGB);
-  resizedImageRGB.convertTo(resizedImage, CV_32F, 1.0 / 255);
-
-  cv::Mat channels[3];
-  cv::split(resizedImage, channels);
-
-  channels[0] = (channels[0] - 0.485) / 0.229;
-  channels[1] = (channels[1] - 0.456) / 0.224;
-  channels[2] = (channels[2] - 0.406) / 0.225;
-  cv::merge(channels, 3, resizedImage);
-  cv::dnn::blobFromImage(resizedImage, preprocessedImage);
-
-  size_t inputTensorSize = vectorProduct(inputDims);
-  std::vector<float> inputTensorValues(inputTensorSize);
-
-  for (int64_t i = 0; i < batchSize; ++i) {
-    std::copy(preprocessedImage.begin<float>(), preprocessedImage.end<float>(),
-              inputTensorValues.begin() + i * inputTensorSize / batchSize);
+  for (auto input_name : input_node_names) {
+    std::cout << "input node name   : " << input_name << std::endl;
   }
 
-  size_t outputTensorSize = vectorProduct(outputDims);
-  assert(("Output tensor size should equal to the label set size.",
-          labels.size() * batchSize == outputTensorSize));
-  std::vector<float> outputTensorValues(outputTensorSize);
+  for (const char *output_name : output_node_names) {
+    std::cout << "output node name  : " << output_name << std::endl;
+  }
 
-  std::vector<const char *> inputNames{inputName};
-  std::vector<const char *> outputNames{outputName};
-  std::vector<Ort::Value> inputTensors;
-  std::vector<Ort::Value> outputTensors;
+  std::cout << std::endl;
+
+  cv::Mat image = cv::imread("data/dog.png");
+
+  std::vector<int64_t> inputDims =
+      session.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+
+  model_input_height = inputDims.at(3);
+  model_input_width = inputDims.at(2);
+
+  cv::Mat inputImage = preprocess(image);
 
   Ort::MemoryInfo memoryInfo = Ort::MemoryInfo::CreateCpu(
       OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeDefault);
 
-  inputTensors.push_back(Ort::Value::CreateTensor<float>(
-      memoryInfo, inputTensorValues.data(), inputTensorSize, inputDims.data(),
-      inputDims.size()));
-  outputTensors.push_back(Ort::Value::CreateTensor<float>(
-      memoryInfo, outputTensorValues.data(), outputTensorSize,
-      outputDims.data(), outputDims.size()));
+  Ort::Value inputTensor = Ort::Value::CreateTensor<float>(
+      memoryInfo, inputImage.ptr<float>(), inputImage.total() * sizeof(float),
+      inputDims.data(), inputDims.size());
 
-  session.Run(Ort::RunOptions{nullptr}, inputNames.data(), inputTensors.data(),
-              1 /*Number of inputs*/, outputNames.data(), outputTensors.data(),
-              1 /*Number of outputs*/);
+  std::vector<Ort::Value> outputTensors = session.Run(
+      Ort::RunOptions{nullptr}, input_node_names.data(), &inputTensor,
+      num_input_nodes, output_node_names.data(), num_output_nodes);
 
-  std::vector<int> predIds(batchSize, 0);
-  std::vector<std::string> predLabels(batchSize);
-  std::vector<float> confidences(batchSize, 0.0f);
-  for (int64_t b = 0; b < batchSize; ++b) {
-    float activation = 0;
-    float maxActivation = std::numeric_limits<float>::lowest();
-    float expSum = 0;
-    for (int i = 0; i < labels.size(); i++) {
-      activation = outputTensorValues.at(i + b * labels.size());
-      expSum += std::exp(activation);
-      if (activation > maxActivation) {
-        predIds.at(b) = i;
-        maxActivation = activation;
-      }
-    }
-    predLabels.at(b) = labels.at(predIds.at(b));
-    confidences.at(b) = std::exp(maxActivation) / expSum;
-  }
-  for (int64_t b = 0; b < batchSize; ++b) {
-    assert(("Output predictions should all be identical.",
-            predIds.at(b) == predIds.at(0)));
-  }
-  // All the predictions should be the same
-  // because the input images are just copies of each other.
+  std::vector<Result> resultVector = postprocess(image.size(), outputTensors);
 
-  std::cout << "Predicted Label ID: " << predIds.at(0) << std::endl;
-  std::cout << "Predicted Label: " << predLabels.at(0) << std::endl;
-  std::cout << "Uncalibrated Confidence: " << confidences.at(0) << std::endl;
+  drawBoundingBox(image, resultVector);
 
-  // Measure latency
-  int numTests{100};
-  std::chrono::steady_clock::time_point begin =
-      std::chrono::steady_clock::now();
-  for (int i = 0; i < numTests; i++) {
-    session.Run(Ort::RunOptions{nullptr}, inputNames.data(),
-                inputTensors.data(), 1, outputNames.data(),
-                outputTensors.data(), 1);
-  }
-  std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
-  std::cout << "Minimum Inference Latency: "
-            << std::chrono::duration_cast<std::chrono::milliseconds>(end -
-                                                                     begin)
-                       .count() /
-                   static_cast<float>(numTests)
-            << " ms" << std::endl;
+  // Display the image with detections
+  cv::imshow("Object Detection", image);
+  cv::waitKey(0);
+
+  for (auto ptr : input_node_names)
+    allocator.Free(ptr);
+  for (auto ptr : output_node_names)
+    allocator.Free(ptr);
 
   return 0;
 }
