@@ -2,6 +2,7 @@
 #include <opencv2/opencv.hpp>
 
 #include <iostream>
+#include <opencv2/videoio.hpp>
 
 typedef struct Result {
   int x1;
@@ -55,7 +56,7 @@ std::vector<std::string> classNames = {
 cv::Mat preprocess(cv::Mat &image) {
 
   // Channels order: BGR to RGB
-  cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
+  // cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
 
   // Calculate the scaling factor for resizing without distortion
   double scale;
@@ -143,7 +144,6 @@ std::vector<Result> postprocess(cv::Size originalImageSize,
 }
 
 void drawBoundingBox(cv::Mat &image, std::vector<Result> &resultVector) {
-
   for (auto result : resultVector) {
 
     if (result.accuracy > 0.6) { // Threshold, can be made function parameter
@@ -163,7 +163,6 @@ void drawBoundingBox(cv::Mat &image, std::vector<Result> &resultVector) {
 }
 
 int main() {
-
   const char *model_path = "./data/yolov7-tiny.onnx";
 
   Ort::AllocatorWithDefaultOptions allocator;
@@ -203,6 +202,12 @@ int main() {
   std::cout << std::endl;
 
   cv::Mat image = cv::imread("data/dog.png");
+  //  std::string videoPath = "./data/person-bicycle-car-detection.mp4";
+  //  cv::VideoCapture cap(videoPath);
+  //  if (!cap.isOpened()) {
+  //    std::cerr << "Error opening video stream or file" << std::endl;
+  //    return -1;
+  //  }
 
   std::vector<int64_t> inputDims =
       session.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
