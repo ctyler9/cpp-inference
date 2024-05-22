@@ -201,13 +201,12 @@ int main() {
 
   std::cout << std::endl;
 
-  cv::Mat image = cv::imread("data/dog.png");
-  //  std::string videoPath = "./data/person-bicycle-car-detection.mp4";
-  //  cv::VideoCapture cap(videoPath);
-  //  if (!cap.isOpened()) {
-  //    std::cerr << "Error opening video stream or file" << std::endl;
-  //    return -1;
-  //  }
+  std::string videoPath = "./data/person-bicycle-car-detection.mp4";
+  cv::VideoCapture cap(videoPath);
+  if (!cap.isOpened()) {
+    std::cerr << "Error opening video stream or file" << std::endl;
+    return -1;
+  }
 
   std::vector<int64_t> inputDims =
       session.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
@@ -215,26 +214,32 @@ int main() {
   model_input_height = inputDims.at(3);
   model_input_width = inputDims.at(2);
 
-  cv::Mat inputImage = preprocess(image);
-
   Ort::MemoryInfo memoryInfo = Ort::MemoryInfo::CreateCpu(
       OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeDefault);
 
-  Ort::Value inputTensor = Ort::Value::CreateTensor<float>(
-      memoryInfo, inputImage.ptr<float>(), inputImage.total() * sizeof(float),
-      inputDims.data(), inputDims.size());
+  cv::Mat frame;
+  while (cap.read(frame)) {
+    // Preprocess frame
+    cv::Mat inputImage = preprocess(frame);
 
-  std::vector<Ort::Value> outputTensors = session.Run(
-      Ort::RunOptions{nullptr}, input_node_names.data(), &inputTensor,
-      num_input_nodes, output_node_names.data(), num_output_nodes);
+    Ort::Value inputTensor = Ort::Value::CreateTensor<float>(
+        memoryInfo, inputImage.ptr<float>(), inputImage.total() * sizeof(float),
+        inputDims.data(), inputDims.size());
 
-  std::vector<Result> resultVector = postprocess(image.size(), outputTensors);
+    std::vector<Ort::Value> outputTensors = session.Run(
+        Ort::RunOptions{nullptr}, input_node_names.data(), &inputTensor,
+        num_input_nodes, output_node_names.data(), num_output_nodes);
 
-  drawBoundingBox(image, resultVector);
+    std::vector<Result> resultVector = postprocess(frame.size(), outputTensors);
 
-  // Display the image with detections
-  cv::imshow("Object Detection", image);
-  cv::waitKey(0);
+    drawBoundingBox(frame, resultVector);
+
+    // Display the image with detections
+    cv::imshow("Object Detection", frame);
+    if (cv::waitKey(30) >= 0) {
+      break;
+    }
+  }
 
   for (auto ptr : input_node_names)
     allocator.Free(ptr);
